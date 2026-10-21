@@ -8,7 +8,7 @@
 
 ## 任务背景
 
-任务根据带有目标词标记的句子，从候选词义词典中预测完整词义标识符。现有实现组织五种语言（英语、法语、德语、西班牙语、意大利语）、三类数据来源（`real`、`artificial`、`problem`）及三个难度层级（`simple`、`medium`、`complex`）。文件名 `sem13_*` 是现存代码的输入约定，并不足以单独确认数据集来源或处理版本。
+任务根据带有目标词标记的句子，从候选词义词典中预测完整词义标识符。现有实现组织五种语言（英语、法语、德语、西班牙语、意大利语）、三类数据来源（`real`、`artificial`、`problem`）及三个难度层级（`simple`、`medium`、`complex`）。论文 IV-A 将真实数据的上游来源明确指向 [SapienzaNLP/mwsd-datasets](https://github.com/SapienzaNLP/mwsd-datasets)。项目使用的具体处理文件、上游子集及转换版本仍需与实际输入核对。
 
 保留的模型接口标识为 `gpt-4o`、`llama-3.1-70b`、`deepseek-v3`；它们是接口别名，不代表已经确认的服务商、不可变模型快照或当前可用性。
 
@@ -56,6 +56,10 @@ python experiment_runner1_v2.py
 详细的分组运行和指标导出见 [复现说明](docs/reproduce.md)，首次操作见 [快速上手](docs/quick_start.md)。
 
 ## 数据集说明
+
+论文 IV-A 对三类数据作出说明：`real` 为带 BabelNet 或 WordNet 关联标签的真实上下文，公开上游为 [SapienzaNLP/mwsd-datasets](https://github.com/SapienzaNLP/mwsd-datasets)；`artificial` 为围绕显式词义标识符生成、带三个难度层级的句子；`problem` 为含干扰项或面向领域歧义的上下文。后两类为项目构造数据，论文未提供其独立公开下载地址。
+
+上游提供 SemEval 多语言数据下载入口，原始交付为 XML 与 gold-key 文件，不能直接改名作为本项目 CSV。英语材料入口与四种非英语语言分开说明，具体使用的英语子集还需核实。获取、转换与待补材料见 [数据说明](docs/data_schema.md)。
 
 `data/` 存放评估数据，`support_data/` 存放独立示例库，二者采用相同文件路径约定；候选词义缓存位于 `resources/`。输入文件及缓存默认被 Git 忽略，不随仓库分发。
 
