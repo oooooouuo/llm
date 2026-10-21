@@ -6,6 +6,8 @@
 
 方法：multilingual-e5-large 检索英语上下文；paraphrase-multilingual-MiniLM-L12-v2 按语义相似度与频率权重排序示例；表层词数与标点数决定示例数量及是否启用显式推理提示。真实数据限制示例数量，英语目标采用单语回退。
 
+数据来源：论文 IV-A 将真实数据上游明确指向 https://github.com/SapienzaNLP/mwsd-datasets；人工数据为围绕显式词义 ID 生成的分层句子，问题导向数据包含干扰项或领域化歧义上下文。公开上游材料仍需核对具体子集并转换成项目 CSV；后两类数据未在论文提供独立下载地址。
+
 代码入口：`experiment_runner1_v2.py`。`preflight.py` 校验数据与资源；`evaluation.py` 对最终 JSON 中的完整词义 ID 精确判分。`--check-only` 只检查输入，`--limit` 用于小规模冒烟检查。
 
 实验范围：三个保留接口别名 gpt-4o、llama-3.1-70b、deepseek-v3；en、fr、de、es、it 五种语言；real、artificial、problem 三类来源；三个难度层级；Baseline、Ours(No_CoT)、Ours(Fusion) 三组。
