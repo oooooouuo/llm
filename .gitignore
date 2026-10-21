@@ -1,0 +1,58 @@
+# Python / local environment
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+# Credentials and local adapters
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials*
+model_interface.py
+# Data and resource caches are local-only; retain guidance files
+/data/*
+!/data/README.md
+/support_data/*
+!/support_data/README.md
+/resources/*
+!/resources/README.md
+.cache/
+models/
+# Generated outputs, logs, progress, local environment manifests
+outputs/
+*experiment_results/
+*experiment_progress.json
+*.log
+logs/
+requirements-lock.local.txt
+run-environment.local.txt
+# Editors / OS / local manuscripts
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.docx
+*.pdf
+*.zip
+*.tar.gz
+# Additional private configuration and credential stores
+*.local.json
+*.local.yaml
+*.local.yml
+api_keys*
+tokens*
+secrets.*
+.aws/
+.ssh/
+id_rsa*
+id_ed25519*
