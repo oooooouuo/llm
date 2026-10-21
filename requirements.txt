@@ -1,8 +1,8 @@
-# Direct imports extracted from the supplied source; historical versions unknown.
-# No version pins are invented. This file is NOT a validated historical lockfile.
+# Direct runtime dependencies.
+# This release does not include an end-to-end validated version lockfile.
 numpy
 pandas
 sentence-transformers
 # pandas.DataFrame.to_markdown runtime dependency:
 tabulate
-# model_interface.py is user-supplied; add its real SDK dependencies after review.
+# Also install the SDK dependencies required by the local model adapter.
