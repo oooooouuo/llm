@@ -1,71 +1,72 @@
-# 数据来源与输入格式
+# 数据来源与准备协议
 
-我们使用真实语料、人工构造语料和问题导向语料，分别考察自然分布上下文、显式词义对齐上下文及干扰较强上下文中的词义消歧表现。数据、模型权重与词义资源不随代码分发。
+我们使用真实语料、人工构造语料和问题导向语料。数据、候选词义资源与权重保存在本地，不随代码分发。
 
-## 数据来源
+## 数据来源与获取
 
-- `real`：使用 [SapienzaNLP/mwsd-datasets](https://github.com/SapienzaNLP/mwsd-datasets) 提供的多语言 WSD 资源，句子带有 BabelNet 或 WordNet 关联词义标签。
-- `artificial`：围绕显式词义标识符生成句子，并设置 `simple`、`medium` 和 `complex` 三个标注难度层级。
-- `problem`：构造含干扰项或具有领域特征的上下文，以考察歧义较强条件下的消歧表现。
+- `real`：使用 [SapienzaNLP/mwsd-datasets](https://github.com/SapienzaNLP/mwsd-datasets) 的多语言资源。`fetch_public_data.py` 通过该项目列出的公开入口下载 ALL 包，转换 SemEval-2013 的 de、es、fr、it 四种语言。
+- `artificial`：围绕显式词义标识符构造，并标注三个难度层级的句子。
+- `problem`：具有较强干扰或领域特征的上下文。
 
-当前发布未包含人工数据和问题导向数据的具体样本、生成脚本及完整生成配置。这两类数据目前没有随仓库提供的下载包。
-
-## 获取公开上游材料
-
-多语言资源提供 SemEval-2013 与 SemEval-2015 数据，并区分 `all` 与 `wn` 子集。英语资源通过 [English WSD Evaluation Framework](http://lcl.uniroma1.it/wsdeval/) 获取，不能直接以非英语数据替代。
-
-1. 从 [上游 README](https://github.com/SapienzaNLP/mwsd-datasets#readme) 中的 Multilingual datasets 下载入口获取所需压缩包。记录所选子集、下载日期与文件哈希。
-2. 明确评测年份、语言、`all`/`wn` 子集及词义映射。不同子集的覆盖范围不同；开展独立实验时，应将这些选择写入数据处理记录。
-3. 将 `.data.xml` 与 `.gold.key.txt` 按实例 ID 对齐，转换为本项目的 CSV 输入。转换时保留目标词位置、多词表达和多个正确标签，并记录分词、标点及文本重建方式。
-4. 记录样本筛选、难度分层和评估集与示例库的划分规则。本仓库当前未包含 XML 到项目 CSV 的完整转换程序，也未发布对应的处理配置。
-5. 使用独立的授权词义资源建立候选缓存。上游提供 inventory 构建工具；使用 `withgold` 文件前应检查候选构建是否依赖评估标签，避免将目标正确词义引入检索过程。
-
-上游数据涉及 BabelNet 4.0 的词义映射。候选缓存与数据标签须使用相容的标识符版本，并在运行记录中注明。数据、词义资源和生成模型分别遵循各自的许可与服务条款，本仓库 MIT 许可证不覆盖这些第三方资源。下载和再分发前请核对对应条款。
-
-## 数据处理与版本
-
-每次实验应记录输入版本、转换程序、筛选规则、难度划分及示例库来源。采用不同处理流程或重新生成的样本时，应单独标明数据版本；不同版本的结果不默认与论文报告逐条对应。
-
-## 路径
-
-对每个所选语言 `LANG`，文件布局为：
-
-```text
-data/                         # 仅评估集
-  LANG/sem13_LANG.csv          # real
-  artificial_LANG.csv         # artificial
-  problem_LANG.csv            # problem
-support_data/                 # 独立示例库，采用同样的文件名和子目录
-  LANG/sem13_LANG.csv
-  artificial_LANG.csv
-  problem_LANG.csv
-resources/
-  babelnet_inventory_cache_healed.json
+```bash
+python fetch_public_data.py
 ```
 
-`LANG` 取 `en`、`fr`、`de`、`es`、`it`。只准备本次所选的数据类型及语言；每种数据类型的示例库额外需要英语文件。`--data-dir`、`--support-dir`、`--inventory` 可覆盖默认路径。评估目录与示例库目录不得相同。
+输出 `local_data/upstream/` 包含原始压缩包、上游许可、下载哈希、XML/gold-key 原件及转换 CSV。不会自动获取英语，也不会把重新下载的数据称为历史项目输入。英语资源另见 [English WSD Evaluation Framework](http://lcl.uniroma1.it/wsdeval/)。上游资源与词义库适用其各自条款，本仓库 MIT 不覆盖它们。
 
-## CSV 字段
+已有 XML/gold 文件时：
 
-| 字段 | 约束及用途 |
+```bash
+python convert_wsd.py --xml /path/to/dataset.data.xml --gold /path/to/dataset.gold.key.txt --language fr --output local_data/imported_real/fr/sem13_fr.csv
+```
+
+转换保留实例 ID、文档 ID、多词目标与多个金标；未标注的实例会记录后跳过。句子按原 XML token 文本以空格连接。该转换采用新的表层复杂度分层 `surface_v1_new_preparation`，不声称与历史 CSV 处理相同。
+
+## 输入文件与字段
+
+每个来源目录可包含 `artificial_LANG.csv`、`problem_LANG.csv` 或 `LANG/sem13_LANG.csv`。`LANG` 取 en、fr、de、es、it。可以通过重复的 `--source-dir` 同时导入多个目录；同来源同语言只能显式选择一份输入，程序不自动猜测应使用哪个旧版本。
+
+| 字段 | 约定 |
 | --- | --- |
-| `sentence` | 非空句子，恰含一个非空 `<WSD>目标词</WSD>` 标记对 |
-| `senseid` | 完整 BabelNet 风格 ID（`bn:` 后跟数字和小写词性字母），或末尾为 `::` 的 WordNet 风格键（实现支持的子集）；多个正确 ID 使用逗号或空白分隔 |
-| `complexity` | 评估集必需；取 `simple`、`medium`、`complex`；用于数据分层，示例库可不提供 |
-| `frequency_weight` | 可选；有限非负数；空缺按 1.0 处理，仅影响语义示例排序 |
+| `sentence` | 恰好一个非空 `<WSD>...</WSD>` 目标，不能有额外或不配对标记 |
+| `senseid` | 完整标识符；多个金标以逗号或空白分隔 |
+| `complexity` | `simple`、`medium` 或 `complex`，输入的分层标签会保留 |
+| `fileid` | 可选文档 ID；真实数据按该字段分组隔离，XML 转换会保留它 |
+| `frequency_weight` | 可选有限非负权重，缺失为 1 |
 
-编码使用 UTF-8，可含 BOM。`complexity` 是输入分层标签；自适应策略另外根据原始标记句子的空格分词数和标点数计算复杂度，二者不能混同。脚本不会从缺失列推断层级，防止同一批样本重复计入三个层级。
+词义 ID 支持 BabelNet 风格和末尾为 `::` 的 WordNet 风格键子集。runner 的提示策略分数与 CSV 难度标签分别记录，不能将二者混为同一项。
 
-## 候选词义缓存
+## 可追溯清理
 
-【该配置文件需要使用者自行根据数据集/模型凭证补充】：`resources/babelnet_inventory_cache_healed.json`。
+```bash
+python prepare_data.py --source-dir /path/to/document11 --inventory-source /path/to/babelnet_inventory_cache_healed.json
+```
 
-顶层为 JSON 对象，键为 `语言代码:小写目标词`；为兼容已有格式，也支持仅小写目标词作为回退键。值为非空列表，每项包含字符串 `id`（单个完整词义 ID）和非空字符串 `gloss`。英语键还用于建立词义到英语 lemma 的桥接索引。
+默认输出到 `local_data/current/`。程序保留源文件、写入新目录，记录输入 SHA-256、行号与稳定样本 ID。输出目录存在时拒绝覆盖。
 
-候选集合必须来自独立词典或预先确定的资源，不得用评估集正确标签建立、补齐或缩减候选集合。检查标签覆盖仅用于发现错误输入，不改变词典。运行记录应包含缓存的资源版本、构建方法和许可。
+无效目标标记、非法标签、独立词典未覆盖金标的行被排除。同来源同语言中，只有带相同目标位置的上下文才参与重复/冲突检查；同一句子的不同目标词不会因此被误删。同目标上下文的冲突标注整体排除，一致重复保留首条。每次排除均记录于 `excluded_rows.csv`，不按论文样本数反向筛选，不修改标签，也不从金标补建候选词典。
 
-## 划分与审计
+缓存只保留已有的合法 ID 和非空释义，移除空列表和重复候选；不生成替代释义。释义质量与资源授权仍需按来源审查。
 
-示例库可使用经授权的训练/开发标注，评估样本只用于评分。程序阻止去除标记、大小写和连续空白差异后的完全相同句子跨集合出现；无法自动检测翻译对齐、近重复、同一文档、实体或构建过程中的泄漏。使用者应按文档或平行语料来源建立隔离划分，并记录授权来源、处理流程、样本筛选、层级划分、文件版本和 SHA-256。
+## 独立划分
 
-数据处理版本决定实际评估范围。更换子集或难度标注规则后，应更新实验协议，并分别报告结果。
+新协议为 `synthetic_sense_real_document_and_identical_sentence_groups_v2`：人工/问题数据共享金标词义的记录保持同组；真实数据同文档记录保持同组；跨来源、语言归一化后完全相同的句子也连为同组。真实数据缺少文档 ID 时，只能按句子关联。多个标签形成的关联会合并分组。
+
+以种子和稳定组 ID 的 SHA-256 确定分配，默认约 30% 分配到示例库，实际比例以分组结果为准。真实数据允许不同文档共享词义；人工数据采用更保守的词义隔离，可能使英语中没有目标词义的示例，从而降低检索覆盖。这是新的独立评估设置，不是历史划分。
+
+金标仅用于分组与评分，不用于构造候选或目标检索。分组仍不能自动排除所有翻译、改写或其他语义近重复，须结合来源审查。
+
+## 输出与缺失英语策略
+
+```text
+local_data/current/
+  data/                         # 评估 CSV
+  support_data/                 # 独立示例 CSV
+  resources/babelnet_inventory_cache_healed.json
+  excluded_rows.csv             # 来源行号与排除原因
+  data_manifest.json            # 文件指纹、协议、数量与检查状态
+```
+
+默认要求每种来源有英语示例库。公开多语言包没有英语时，可以显式添加 `--allow-missing-english` 准备数据，并在运行时采用同名选项，且只选择存在的目标语言。该来源改用单语回退，配置会记录这一变化；不得将其解释为跨语言策略已经获得验证。
+
+独立词义缓存和模型凭证属于本地配置文件：【该配置文件需要使用者自行根据数据集/模型凭证补充】。恢复的缓存可以经清理复用，无需寻找原构建程序才能运行新实验。

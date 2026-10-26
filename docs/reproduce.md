@@ -1,106 +1,95 @@
 # 实验复现说明
 
-本仓库提供实验源代码，不附带历史实验结果文件。以下说明本地配置、各组运行方式和指标口径。公开版本尚未完成真实模型的端到端验证。
+本仓库发布源代码，不附带历史实验结果文件。以下流程用于在明确的输入、划分和模型配置下开展新实验。
 
-## 运行前条件
+## 一 生成本地输入
 
-按 [data_schema.md](data_schema.md) 准备独立的评估集、示例库和候选缓存，按 [model_interface.md](model_interface.md) 补齐真实模型接口及凭证。确认有权向模型服务发送数据，并记录实际模型快照、供应商、采样参数、SDK 版本和资源版本。
-
-当前发布未提供经端到端验证的依赖锁定文件。完成环境安装和运行验证后，记录所用版本：
+已有带词义 ID 的 CSV 和独立词典时：
 
 ```bash
-python -m pip freeze > requirements-lock.local.txt
-python --version > run-environment.local.txt
+python prepare_data.py --source-dir /path/to/document11 --inventory-source /path/to/babelnet_inventory_cache_healed.json
 ```
 
-这两个文件被 Git 忽略。审查 `pip freeze` 中的本地路径、私有索引和 URL 凭证后，才能决定是否另行发布脱敏的锁定环境。环境记录应与对应的运行结果一起保存。
+公开真实语料可用 `python fetch_public_data.py` 下载转换。合并多类输入时重复使用 `--source-dir`，并为新的准备版本选择未使用过的 `--output-root`。完整要求见 [data_schema.md](data_schema.md)。
 
-## 数据准备
+`data_manifest.json` 记录输入指纹、清理与分组协议；`excluded_rows.csv` 记录排除原因。这里的数据处理数量不是模型性能结果。人工数据按共享词义关联，真实数据按文档关联，相同句子保持同侧；这属于新的保守评估设置，会影响示例覆盖与可比较性。
 
-真实语料使用 [SapienzaNLP/mwsd-datasets](https://github.com/SapienzaNLP/mwsd-datasets) 的多语言资源；人工语料围绕词义 ID 构造分层句子，问题导向语料使用含干扰项或领域特征的上下文。数据来源、获取方式和字段要求见 [数据说明](data_schema.md)。
+## 二 准备编码器和模型接口
 
-公开上游的 XML 与 gold-key 文件需先转换为项目 CSV，再配置独立示例库及候选词义缓存。当前发布未包含完整转换程序、人工语料生成脚本或对应处理配置。准备新数据时，应记录处理流程和数据版本。
+```bash
+python prepare_embeddings.py
+cp .env.example .env
+```
 
-## 实验组与方法
+如需复用本地 E5 权重，用 `--local-e5-source` 指定本地目录。脚本从官方来源补齐 pooling 元数据，不修改来源。配置写入本地 `models/encoder_paths.local.json`，runner 自动读取；也可由环境变量 `WSD_E5_MODEL` 和 `WSD_SAMPLER_MODEL` 覆盖。
 
-| 组名 | 示例与提示策略 |
+`.env` 中配置自己的服务凭证与模型端点。模型适配器已经提供；无需找到旧配置或恢复旧密钥。参数与身份检查见 [model_interface.md](model_interface.md)。没有有效凭证时仍可运行输入检查和离线检索检查。
+
+## 三 分阶段检查
+
+```bash
+python -B -m unittest discover -s tests -v
+python experiment_runner1_v2.py --check-only --data-types artificial problem
+python experiment_runner1_v2.py --dry-run --models gpt-4o --languages fr --data-types artificial --levels simple --limit 1
+python experiment_runner1_v2.py --check-config --models gpt-4o
+```
+
+`--check-only` 只用标准库检查输入；`--dry-run` 使用真实编码器走同一套检索、示例选择与提示代码，但不创建生成模型客户端、不计算准确率；`--check-config` 仅检查配置和凭证是否设置，不请求服务。
+
+若真实数据没有英语示例库，明确采用单语回退并只选择存在的语言：
+
+```bash
+python experiment_runner1_v2.py --check-only --data-types real --languages de fr es it --allow-missing-english
+python experiment_runner1_v2.py --dry-run --models gpt-4o --data-types real --languages de fr es it --allow-missing-english --limit 1
+```
+
+没有指定 `--allow-missing-english` 时，缺失英语池会报错。该选项不创建英语数据，也不使目标英语评估自动可用。
+
+## 四 各组实验
+
+| 组名 | 示例与提示 |
 | --- | --- |
-| `Baseline` | 独立单语示例库中相同目标词最多随机选 3 条，关闭显式推理提示 |
-| `Ours(No_CoT)` | 英语检索、语义重排与自适应示例数，关闭显式推理提示 |
-| `Ours(Fusion)` | 同上，并按表层复杂度决定是否启用显式推理提示 |
+| `Baseline` | 单语同词示例最多随机选择 3 条，关闭显式推理提示 |
+| `Ours(No_CoT)` | 英语检索、语义选择、自适应示例数，关闭显式推理提示 |
+| `Ours(Fusion)` | 同上，并按复杂度决定是否开启显式推理提示 |
 
-表层复杂度为原始标记句子的空格分词数加 0.2 倍指定标点数。得分低于 15 时 `k=3`，低于 30 时 `k=5`，其余 `k=5` 并在完整组启用推理提示。真实数据示例数上限为 3，语义权重系数为 1.0；其他来源系数为 2.0。Baseline 按样本序号使用 `42+i` 随机种子，不代表远程模型生成确定性。
+表层复杂度为标记句子的空格分词数加 0.2 倍指定标点数。得分低于 15 时 k=3；低于 30 时 k=5；其余 k=5，完整组开启推理。真实数据 k 上限为 3、语义权重系数为 1，其余来源系数为 2。Baseline 使用 42+i 的采样种子，不保证远程生成确定性。
 
-非英语目标先按候选词义集合约束英语示例，E5 最多召回 15 条，MiniLM 进行频率与相似度加权排序。真实数据词义匹配为空时尝试英语 lemma 桥接，阈值实际为 `max(0.82, 0.86)=0.86`；检索为空时回退单语同词示例。英语目标直接采用单语回退。真实数据的提示保留上下文示例，但不显示示例正确 ID；其他来源显示示例标注。
+非英语目标按独立候选词义约束英语示例；E5 最多召回 15 条，MiniLM 加权排序。真实来源在直接匹配为空时使用 lemma 桥接，实际阈值下限为 0.86。英语目标或检索为空时采用单语回退。真实来源提示不展示示例金标，其他来源展示。E5 保留语言代码前缀输入协议。
 
-E5 输入在句子前添加语言代码前缀。`--levels` 选择 CSV 已有层级，不改变策略重新计算的分数。这里只提供完整组与关闭推理组的比较，不能证明每个模块各自的独立因果贡献。
-
-## 检查输入
+配置完凭证后，以下命令会实际调用服务并产生费用：
 
 ```bash
-python experiment_runner1_v2.py --check-only --models gpt-4o --languages fr --data-types real
+python experiment_runner1_v2.py --models gpt-4o --languages fr --data-types artificial --versions Baseline 'Ours(No_CoT)' 'Ours(Fusion)' --save-response
 ```
 
-缺失文件、列、词义覆盖或重复句子会使检查失败。只校验所选数据来源和语言，并要求相应英语示例库。没有选中层级的样本时该层级跳过；最终无样本则报错，不导出空结果。
-
-## 启动各组
-
-为便于同组计算增益，建议在一次调用中运行三个版本：
+单个版本可通过 `--versions Baseline`、`--versions 'Ours(No_CoT)'` 或 `--versions 'Ours(Fusion)'` 选择。建议同一次调用运行三个版本，便于配对计算 Baseline 差值。
 
 ```bash
-python experiment_runner1_v2.py --models gpt-4o --languages fr --data-types real --versions Baseline 'Ours(No_CoT)' 'Ours(Fusion)'
+python experiment_runner1_v2.py --data-types artificial problem --save-response
+python experiment_runner1_v2.py --data-types real --languages de fr es it --allow-missing-english --save-response
 ```
 
-只运行单个版本时可用：
+`--data-dir`、`--support-dir` 和 `--inventory` 可覆盖默认 `local_data/current/` 路径。完整数据矩阵准备齐备后可运行不带筛选参数的入口；缺项会报错，不静默补样本。
 
-```bash
-python experiment_runner1_v2.py --models gpt-4o --languages fr --data-types real --versions Baseline
-python experiment_runner1_v2.py --models gpt-4o --languages fr --data-types real --versions 'Ours(No_CoT)'
-python experiment_runner1_v2.py --models gpt-4o --languages fr --data-types real --versions 'Ours(Fusion)'
-```
+## 五 指标与导出
 
-分开调用生成独立输出，程序不会跨调用合并 Baseline；没有同次、同模型、同来源、同语言、同层级的 Baseline 时，改进值为空。
+真实生成实验保存到 `outputs/<运行标识>/`：
 
-分来源执行所有保留模型与语言：
+- `fusion_summary_*.csv`：按模型、来源、语言、难度、版本区分的汇总。
+- `fusion_sample_detail_*.csv`：输入、候选、策略与正确性；调用元数据使用 JSON 编码。
+- `sample_journal.jsonl`：每条完成响应立即写入的本地记录，便于异常后检查；当前不提供自动续跑。
+- `config_*.json`：代码所用配置、接口身份、包版本、选择条件与输入指纹。
+- `report_*.md`：该次运行结果的逐单元报告，不混合模型或来源平均。
 
-```bash
-python experiment_runner1_v2.py --data-types real
-python experiment_runner1_v2.py --data-types artificial
-python experiment_runner1_v2.py --data-types problem
-```
+准确率为正确数除以总数，取值 0–1。`improvement` 为准确率差，乘 100 为百分点；缺少同次同组 Baseline 时留空。只接受响应结尾仅含 `sense_id` 的合法 JSON，完整 ID 区分大小写精确匹配；分析正文中的正确 ID、数字片段或子串不计分。空响应和格式失败计错；服务异常终止该运行，不产生完整实验结论。
 
-执行所有保留模型、五种语言、三种来源、三种层级和三个版本：
+提示与响应默认不保留全文；需要独立重评分时启用 `--save-response`，必要时加 `--save-prompt`。样本记录即使没有响应全文仍包含输入文本与标注，应受本地权限和数据许可约束。
 
-```bash
-python experiment_runner1_v2.py
-```
+离线检查只产生 `pipeline_check.json`，标明 `model_calls=0` 和 `metrics_computed=false`。它不能作为模型性能、论文结论或服务连通性的证据。
 
-首次可添加 `--limit 2 --levels simple` 做冒烟检查，该选项按输入顺序截取每个单元，不能作为完整评估。接口每次请求最多要求 1024 个输出 token；主脚本请求间隔为 1.2 秒，服务端实际限额与重试由接口处理。没有自动样本级续跑，异常后重新启动会创建新的运行目录；不得将不同运行的部分结果冒充完整运行。
+## 六 记录与比较
 
-## 指标与导出
+本地已安装包清单见 `requirements-tested-macos-py312.txt`；它对应新的验证环境。还应记录硬件、代码提交、输入版本、资源来源、实际模型快照和完整调用设置。语义近重复、预训练污染和供应商内部更新无法仅凭静态检查排除。
 
-真实运行完成后自动生成：
-
-```text
-outputs/<独立运行目录>/
-  fusion_summary_<运行标识>.csv
-  fusion_sample_detail_<运行标识>.csv
-  config_<运行标识>.json
-  report_<运行标识>.md
-  [debug_]experiment_progress.json
-  [debug_]temp_experiment_results/
-```
-
-这些是程序未来实际执行时的输出路径，本仓库不附带对应结果文件。
-
-汇总按 `model_name`、`data_source`、`target_language`、`data_level`、`system_version` 区分。`accuracy=correct_samples/total_samples`，取值 0–1；`improvement=组准确率−同组Baseline准确率`，乘 100 为百分点，不能写成相对百分比提升。Baseline 自身改进值为 0。
-
-答案必须在响应结尾提供只含 `sense_id` 的合法 JSON 对象，可包在 Markdown 代码围栏中；推理文字可以出现在该最终对象之前。完整标识符须与某一真实标签精确、区分大小写相等。正文或推理中提到正确 ID、数字片段或子串均不计正确。格式错误、空响应计错，不从分母剔除；服务异常终止运行，不生成完整运行结论。
-
-样本明细含真实输入句子、标注、候选集、策略选择、回退状态及正确性；即使未保存提示/响应，仍有数据隐私和许可约束。若授权允许且需要独立复核响应，可显式加 `--save-response`，必要时加 `--save-prompt`，保存于本地。未保存响应时无法事后独立重判。
-
-配置 JSON 记录本次选择、Python 与主要包版本、评估协议、输入行数及 SHA-256；接口 SDK、服务采样参数、权重 revision、硬件及代码提交哈希仍须另行记录。逐单元检查样本数、空响应与格式失败情况，保留运行材料后再撰写结果。当前导出的是描述性指标，不包含重复运行统计、置信区间或显著性检验。
-
-## 版本与评估协议
-
-见 [changes.md](changes.md)。本次发布对评估协议作出调整，新运行结果应与论文报告分别记录。完全重复检查不能替代跨语言或同源文档的数据划分审计。
+当前实验矩阵不能分离所有模块的独立因果效应，也不自动输出重复运行统计、置信区间或显著性检验。协议变化见 [changes.md](changes.md)。

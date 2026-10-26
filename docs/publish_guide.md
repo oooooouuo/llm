@@ -18,7 +18,7 @@ cd "$HOME/Desktop/multilingual-wsd"
 
 ## 发布前检查
 
-发布前阅读 [凭证与数据管理](security_review.md)、[版本变更](changes.md) 和 [README](../README.md)，检查授权、署名及运行说明是否与实际版本一致。当前公开版尚未完成真实模型端到端验证，发布说明应保留这一状态。
+发布前阅读 [凭证与数据管理](security_review.md)、[版本变更](changes.md) 和 [README](../README.md)，检查授权、署名及运行说明是否与实际版本一致。当前已完成真实编码器离线流程验证，尚未完成付费生成模型端到端验证，发布说明应保留这一界限。
 
 本仓库发布实验源代码，不附带历史实验结果文件。新增运行结果时，应记录输入版本、环境、模型快照与运行时间。
 
@@ -40,7 +40,7 @@ git config user.email "YOUR_VERIFIED_OR_GITHUB_NOREPLY_EMAIL"
 将上述占位值替换为自己的真实公开署名设置。首次提交采用明确路径：
 
 ```bash
-git add README.md requirements.txt .gitignore LICENSE experiment_runner1_v2.py evaluation.py preflight.py docs tests data/README.md support_data/README.md resources/README.md FILE_MANIFEST.md
+git add README.md FILE_MANIFEST.md .gitignore .env.example LICENSE requirements.txt requirements-tested-macos-py312.txt experiment_runner1_v2.py evaluation.py preflight.py model_interface.py prepare_data.py convert_wsd.py fetch_public_data.py prepare_embeddings.py docs tests .github data/README.md support_data/README.md resources/README.md
 git diff --cached --stat
 git diff --cached
 ```
@@ -52,7 +52,7 @@ python -m unittest discover -s tests -v
 git commit -m "Prepare multilingual WSD source release"
 ```
 
-单元测试不调用模型；其临时结构用例不是科研数据或实验结果。缺失真实接口与资源时，`--check-only` 返回非零属于预期，不能伪称完整验证通过。
+单元测试不调用模型；其临时结构用例不是科研数据或实验结果。接口已随代码提供；输入或凭证缺失会在相应检查阶段返回非零。离线流程检查通过不等于生成模型实验完成。
 
 ## 在 GitHub 创建并推送
 
@@ -67,13 +67,13 @@ git remote add origin https://github.com/YOUR_USERNAME/multilingual-wsd.git
 git push -u origin main
 ```
 
-推送后在网页核对 README、许可证和文件列表；确认 `data/`、`support_data/`、`resources/` 只有说明文件，`outputs/` 与本地接口未被上传。根据实际仓库地址和经核实的论文信息补充引用章节。知识库存档只需单独导入 [knowledge_base.md](knowledge_base.md)。
+推送后在网页核对 README、许可证和文件列表；确认数据目录只发布说明文件，`local_data/`、`models/`、`.cache/`、`.venv/`、`outputs/` 和本地 `.env` 未被上传；公开适配器没有密钥或个人路径。根据实际仓库地址和经核实的论文信息补充引用章节。知识库存档只需单独导入 [knowledge_base.md](knowledge_base.md)。
 
 ## 上传前简短自检
 
 - [ ] 执行代码、配置与文档中的实验范围一致。
 - [ ] 无密钥、个人绝对路径、私有接口、数据原文或未授权第三方资源。
 - [ ] 无伪造结果、图表、运行日志或未经验证的复现结论。
-- [ ] 接口、数据、候选缓存的配置要求与验证状态已注明。
+- [ ] 适配器、数据准备、候选缓存及凭证的配置要求与验证状态已注明。
 - [ ] 候选词典独立构建，评估集与示例库隔离，指标使用精确匹配。
 - [ ] MIT 授权与版权归属、真实引用信息、提交邮箱及暂存文件已核实。

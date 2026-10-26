@@ -1,35 +1,39 @@
 # 快速上手
 
-本项目是源代码复现工具，不附带历史实验结果文件。初次使用应先配置本地依赖与数据，再启动付费模型调用。
+本项目发布源代码，不附带历史实验结果文件。模型接口、数据准备和 XML 转换已经提供，运行前只需配置实际数据、编码器与自己的服务凭证。
 
-## 环境与配置
-
-从仓库根目录执行：
+## 安装与准备
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python experiment_runner1_v2.py --help
+python prepare_data.py --source-dir /path/to/document11 --inventory-source /path/to/babelnet_inventory_cache_healed.json
+python prepare_embeddings.py
 ```
 
-准备 `data/` 中的评估 CSV、`support_data/` 中的独立示例 CSV、`resources/babelnet_inventory_cache_healed.json` 及根目录的 `model_interface.py`。字段见 [data_schema.md](data_schema.md)，接口见 [model_interface.md](model_interface.md)。安装接口 SDK 时把真实依赖加入本地依赖清单。
+已有 E5 权重时，可将最后一条改为 `python prepare_embeddings.py --local-e5-source /path/to/multilingual-e5-large`。准备脚本不会修改来源文件；已有输出会拒绝覆盖。
 
-【该配置文件需要使用者自行根据数据集/模型凭证补充】：候选词义缓存与模型接口所需的凭证配置。完成配置后再启动模型调用。
-
-## 检查与运行
+## 先验证离线流程
 
 ```bash
-python experiment_runner1_v2.py --check-only --languages fr --data-types real --models gpt-4o
-python -m unittest discover -s tests -v
+python experiment_runner1_v2.py --check-only --data-types artificial problem
+python experiment_runner1_v2.py --dry-run --models gpt-4o --languages fr --data-types artificial --levels simple --limit 1
 ```
 
-静态检查只验证文件结构、候选覆盖和完全重复的句子，不会验证凭证、服务可用性或语义层面的数据泄漏；单元测试也不代表实验验证。
+第二条使用真实编码器进行检索与提示构建，不调用付费生成模型，不计算准确率。输出为本地 `outputs/<运行目录>/pipeline_check.json`，其中明确记录 `metrics_computed=false`。
 
-配置完成后进行小规模运行：
+## 再启动真实实验
 
 ```bash
-python experiment_runner1_v2.py --models gpt-4o --languages fr --data-types real --levels simple --limit 2
+cp .env.example .env
 ```
 
-`--limit 2` 对每个选中的评估单元最多读取两行，不是随机抽样，不能据此报告完整实验性能。真实运行结果输出到 `outputs/` 下的独立子目录，默认不会上传 Git。运行完整矩阵和检查指标口径见 [reproduce.md](reproduce.md)。
+在 `.env` 中填写自己的服务密钥，核对模型 ID 和服务地址。无需复制历史接口或使用旧凭证。
+
+```bash
+python experiment_runner1_v2.py --check-config --models gpt-4o
+python experiment_runner1_v2.py --models gpt-4o --languages fr --data-types artificial --levels simple --limit 2 --save-response
+```
+
+后一条会向服务发送真实文本并产生费用。检查调用元数据、响应格式与样本数量后，再移除 `--limit` 执行完整分组。更多命令见 [reproduce.md](reproduce.md)。
