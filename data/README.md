@@ -1,3 +1,3 @@
 # 本地评估数据
 
-此目录只放经授权的评估数据，不附带历史实验结果文件。CSV 由使用者自行准备，默认被 Git 忽略。路径与字段见 [数据说明](../docs/data_schema.md)。不得直接复用为示例库。
+默认运行输入由 `prepare_data.py` 写入 `local_data/current/data/`。此目录保留为自定义数据位置的说明，可通过 `--data-dir` 指定。实际 CSV 不随代码发布。字段、转换与划分见 [数据说明](../docs/data_schema.md)。
