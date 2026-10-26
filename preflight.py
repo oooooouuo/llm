@@ -19,7 +19,7 @@ def normalized_sentence(text):
     return ' '.join(re.sub(r'</?WSD>', '', text, flags=re.I).casefold().split())
 
 
-def validate_inputs(data_dir, support_dir, inventory_path, sources, languages):
+def validate_inputs(data_dir, support_dir, inventory_path, sources, languages, require_english=True):
     errors, manifest = [], []
     inventory_path = Path(inventory_path)
     inventory = {}
@@ -44,7 +44,7 @@ def validate_inputs(data_dir, support_dir, inventory_path, sources, languages):
         errors.append('评估集与示例库必须使用不同目录。')
     sentences = {'evaluation': set(), 'support': set()}
     for role, base, langs in [('evaluation', data_dir, languages),
-                             ('support', support_dir, sorted(set(languages) | {'en'}))]:
+                             ('support', support_dir, sorted(set(languages) | ({'en'} if require_english else set())))]:
         for source in sources:
             for language in langs:
                 path = dataset_path(base, source, language)
@@ -60,7 +60,8 @@ def validate_inputs(data_dir, support_dir, inventory_path, sources, languages):
                     for number, row in enumerate(rows, 2):
                         sentence = row.get('sentence') or ''
                         tags = re.findall(r'<WSD>(.*?)</WSD>', sentence, re.I)
-                        if len(tags) != 1 or not tags[0].strip():
+                        if (sentence.lower().count('<wsd>') != 1 or sentence.lower().count('</wsd>') != 1
+                                or len(tags) != 1 or not tags[0].strip()):
                             raise ValueError(f'第 {number} 行需要一个非空 <WSD>...</WSD> 目标')
                         truth = gold_ids(row.get('senseid'))
                         raw_truth = set(re.split(r'[,\s]+', (row.get('senseid') or '').strip()))

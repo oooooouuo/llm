@@ -10,13 +10,13 @@ import time
 import re
 import json
 from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import sys
 from uuid import uuid4
 BABELNET_CACHE_FILE = 'resources/babelnet_inventory_cache_healed.json'
 PROGRESS_CACHE_FILE = 'experiment_progress.json'
 TEMP_RESULT_DIR = 'temp_experiment_results'
-EXPERIMENT_CONFIG = {'cross_lingual_model': 'intfloat/multilingual-e5-large', 'semantic_sampler_model': 'paraphrase-multilingual-MiniLM-L12-v2', 'sampler_alpha': 2.0, 'e5_retrieve_k': 15, 'complexity_weights': {'word': 1.0, 'punct': 0.2}, 'random_seed': 42, 'request_interval': 1.2, 'save_prompt': False, 'save_response': False, 'debug_mode': False, 'debug_sample_size': 30, 'real_data_config': {'e5_similarity_threshold': 0.82, 'bridge_pre_k': 2, 'sampler_alpha': 1.0, 'fallback_only_when_empty': True}}
+EXPERIMENT_CONFIG = {'cross_lingual_model': os.environ.get('WSD_E5_MODEL', 'intfloat/multilingual-e5-large'), 'semantic_sampler_model': os.environ.get('WSD_SAMPLER_MODEL', 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'), 'sampler_alpha': 2.0, 'e5_retrieve_k': 15, 'complexity_weights': {'word': 1.0, 'punct': 0.2}, 'random_seed': 42, 'request_interval': 1.2, 'save_prompt': False, 'save_response': False, 'debug_mode': False, 'debug_sample_size': 30, 'real_data_config': {'e5_similarity_threshold': 0.82, 'bridge_pre_k': 2, 'sampler_alpha': 1.0, 'fallback_only_when_empty': True}}
 
 @dataclass
 class ExperimentResult:
@@ -60,6 +60,7 @@ class SampleLevelResult:
     model_response: Optional[str]
     is_correct: bool
     sample_run_timestamp: str
+    request_metadata: Dict = field(default_factory=dict)
 
 def extract_target_word(sentence: str) -> str:
     if not isinstance(sentence, str):
@@ -95,11 +96,16 @@ class CrossLingualE5Retriever:
 
     def __init__(self):
         self.model = SentenceTransformer(EXPERIMENT_CONFIG['cross_lingual_model'])
+        self._embedding_cache = {}
 
     def encode(self, sentences: List[str], lang: str) -> np.ndarray:
         prefix = {'en': 'en', 'fr': 'fr', 'de': 'de', 'es': 'es', 'it': 'it'}.get(lang, 'en')
         formatted = [f'{prefix}: {s}' for s in sentences]
-        return self.model.encode(formatted, normalize_embeddings=True, show_progress_bar=False)
+        missing = list(dict.fromkeys(x for x in formatted if x not in self._embedding_cache))
+        if missing:
+            vectors = self.model.encode(missing, normalize_embeddings=True, show_progress_bar=False)
+            self._embedding_cache.update(zip(missing, vectors))
+        return np.asarray([self._embedding_cache[x] for x in formatted])
 
     def retrieve(self, target_sent: str, target_lang: str, english_pool: List[Dict], pre_k: int=15) -> List[Dict]:
         if not english_pool:
@@ -140,6 +146,7 @@ class ActualFusionRunner:
         self.versions = versions
         self.levels = levels
         self.data_types = data_type
+        self.allow_missing_english = False
         if EXPERIMENT_CONFIG.get('debug_mode', False):
             self.output_dir = output_dir
             self.temp_result_dir = os.path.join(output_dir, 'debug_' + TEMP_RESULT_DIR)
@@ -155,6 +162,7 @@ class ActualFusionRunner:
         self.target_langs = languages
         self.cl_retriever = CrossLingualE5Retriever()
         self.sampler = DynamicSemanticSampler(alpha=EXPERIMENT_CONFIG['sampler_alpha'])
+        self.real_sampler = None
         self.analyzer = ActualComplexityAnalyzer()
         self.inventory = self._load_babelnet_cache()
         self.model_interfaces = {}
@@ -194,6 +202,7 @@ class ActualFusionRunner:
         summary_df.to_csv(os.path.join(self.temp_result_dir, f'temp_summary_{self.run_ts}.csv'), index=False, encoding='utf-8-sig')
         sample_df = pd.DataFrame([asdict(r) for r in self.existing_samples])
         sample_df['candidate_senses'] = sample_df['candidate_senses'].apply(json.dumps)
+        sample_df['request_metadata'] = sample_df['request_metadata'].apply(json.dumps)
         sample_df.to_csv(os.path.join(self.temp_result_dir, f'temp_samples_{self.run_ts}.csv'), index=False, encoding='utf-8-sig')
 
     def load_data(self, lang: str, level: str=None, data_type: str='real', reference_pool=False) -> List[Dict]:
@@ -273,6 +282,102 @@ class ActualFusionRunner:
         from evaluation import exact_match
         return exact_match(resp, truth)
 
+    def _prepare_case(self, sample, i, version, monolingual_pool, english_pool,
+                      target_lang, data_type, model_key):
+        target_word = sample.get('target_word', '')
+        complexity_score = sample.get('complexity_score', 0.0)
+        cross_lingual_success = False
+        used_fallback = False
+        retrieve_example_count = 0
+        adaptive_k = 3
+        use_cot = False
+        level_judged = 'simple'
+        eng_candidates = []
+        final_selected = []
+        if version == 'Baseline':
+            pool = [x for x in monolingual_pool if x['target_word'].lower() == target_word.lower() and x['sentence'] != sample['sentence']]
+            np.random.seed(EXPERIMENT_CONFIG['random_seed'] + i)
+            selected = list(np.random.choice(pool, size=min(3, len(pool)), replace=False)) if pool else []
+            retrieve_example_count = len(selected)
+            prompt = self._build_prompt(sample, selected, version, use_cot=False, data_type=data_type, model_name=model_key)
+        elif version in ['Ours(No_CoT)', 'Ours(Fusion)']:
+            decision = self.analyzer.get_adaptive_strategy(sample['sentence'])
+            adaptive_k = decision['k']
+            level_judged = decision['level_judged']
+            complexity_score = decision['score']
+            if version == 'Ours(No_CoT)':
+                decision['use_cot'] = False
+            use_cot = decision['use_cot']
+            candidate_ids = set()
+            for c in sample.get('candidates', []):
+                if c.get('id'):
+                    candidate_ids.add(str(c.get('id')).strip())
+            e5_retrieved = []
+            if target_lang == 'en':
+                cross_lingual_success = False
+            elif data_type != 'real':
+                eng_candidates = [x for x in english_pool if bool(gold_ids(str(x.get('senseid'))) & candidate_ids)]
+                if eng_candidates:
+                    e5_retrieved = self.cl_retriever.retrieve(sample['sentence'], target_lang, eng_candidates, pre_k=EXPERIMENT_CONFIG['e5_retrieve_k'])
+                    cross_lingual_success = len(e5_retrieved) > 0
+                else:
+                    e5_retrieved = []
+                    cross_lingual_success = False
+            else:
+                hard_match_candidates = [x for x in english_pool if bool(gold_ids(str(x.get('senseid'))) & candidate_ids)]
+                if hard_match_candidates:
+                    eng_candidates = hard_match_candidates
+                else:
+                    target_lemmas = set()
+                    for cid in candidate_ids:
+                        target_lemmas.update(self.sense_to_en_lemmas.get(cid, set()))
+                    eng_candidates = []
+                    if target_lemmas:
+                        potential_candidates = [x for x in english_pool if x.get('target_word', '').lower() in target_lemmas]
+                        if potential_candidates:
+                            real_config = EXPERIMENT_CONFIG['real_data_config']
+                            pre_retrieved = self.cl_retriever.retrieve(sample['sentence'], target_lang, potential_candidates, pre_k=real_config['bridge_pre_k'] * 2)
+                            target_emb = self.cl_retriever.encode([clean_sentence(sample['sentence'])], target_lang)
+                            filtered_candidates = []
+                            strict_threshold = max(real_config.get('e5_similarity_threshold', 0.82), 0.86)
+                            for cand in pre_retrieved:
+                                cand_emb = self.cl_retriever.encode([clean_sentence(cand.get('sentence', ''))], 'en')
+                                sim = np.dot(cand_emb, target_emb.T).flatten()[0]
+                                if sim >= strict_threshold:
+                                    cand['similarity'] = sim
+                                    filtered_candidates.append(cand)
+                            eng_candidates = filtered_candidates
+                if eng_candidates:
+                    e5_retrieved = self.cl_retriever.retrieve(sample['sentence'], target_lang, eng_candidates, pre_k=EXPERIMENT_CONFIG['e5_retrieve_k'])
+                    cross_lingual_success = len(e5_retrieved) > 0
+                else:
+                    e5_retrieved = []
+                    cross_lingual_success = False
+            real_config = EXPERIMENT_CONFIG.get('real_data_config', {})
+            fallback_trigger = False
+            if data_type == 'real' and real_config.get('fallback_only_when_empty', True):
+                fallback_trigger = len(e5_retrieved) == 0
+            else:
+                fallback_trigger = len(e5_retrieved) == 0
+            if fallback_trigger:
+                used_fallback = True
+                fallback_pool = [x for x in monolingual_pool if x['target_word'].lower() == target_word.lower() and x['sentence'] != sample['sentence']]
+                e5_retrieved = fallback_pool
+            if data_type == 'real':
+                safe_k = min(3, adaptive_k)
+                real_alpha = EXPERIMENT_CONFIG['real_data_config']['sampler_alpha']
+                if self.real_sampler is None:
+                    self.real_sampler = DynamicSemanticSampler(alpha=real_alpha)
+                final_selected = self.real_sampler.sample(sample['sentence'], e5_retrieved, k=safe_k)
+            else:
+                final_selected = self.sampler.sample(sample['sentence'], e5_retrieved, k=adaptive_k)
+            retrieve_example_count = len(final_selected)
+            prompt = self._build_prompt(sample, final_selected, version, use_cot=use_cot, data_type=data_type, model_name=model_key)
+        return dict(prompt=prompt, target_word=target_word, complexity_score=complexity_score,
+                    adaptive_k=adaptive_k, use_cot=use_cot, level_judged=level_judged,
+                    cross_lingual_success=cross_lingual_success,
+                    retrieve_example_count=retrieve_example_count, used_fallback=used_fallback)
+
     def _test_version(self, model, target_data: List[Dict], version: str, monolingual_pool: List[Dict], english_pool: List[Dict], target_lang: str, model_key: str, level: str, data_type: str) -> Tuple[ExperimentResult, List[SampleLevelResult]]:
         correct = 0
         fallback_count = 0
@@ -286,100 +391,26 @@ class ActualFusionRunner:
         experiment_id = f'{model_key}_{data_type}_{target_lang}_{level}_{version}'
         for i, sample in enumerate(target_data):
             sample_id = str(uuid4())
-            target_word = sample.get('target_word', '')
-            ground_truth = sample.get('senseid', '')
-            complexity_score = sample.get('complexity_score', 0.0)
+            case = self._prepare_case(sample, i, version, monolingual_pool, english_pool,
+                                      target_lang, data_type, model_key)
+            prompt = case['prompt']
+            target_word = case['target_word']
+            complexity_score = case['complexity_score']
+            adaptive_k = case['adaptive_k']
+            use_cot = case['use_cot']
+            level_judged = case['level_judged']
+            cross_lingual_success = case['cross_lingual_success']
+            retrieve_example_count = case['retrieve_example_count']
+            fallback_count += int(case['used_fallback'])
             total_complexity += complexity_score
-            cross_lingual_success = False
-            retrieve_example_count = 0
-            adaptive_k = 3
-            use_cot = False
-            level_judged = 'simple'
-            eng_candidates = []
-            final_selected = []
-            if version == 'Baseline':
-                pool = [x for x in monolingual_pool if x['target_word'].lower() == target_word.lower() and x['sentence'] != sample['sentence']]
-                np.random.seed(EXPERIMENT_CONFIG['random_seed'] + i)
-                selected = list(np.random.choice(pool, size=min(3, len(pool)), replace=False)) if pool else []
-                retrieve_example_count = len(selected)
-                prompt = self._build_prompt(sample, selected, version, use_cot=False, data_type=data_type, model_name=model_key)
-            elif version in ['Ours(No_CoT)', 'Ours(Fusion)']:
-                decision = self.analyzer.get_adaptive_strategy(sample['sentence'])
-                adaptive_k = decision['k']
-                level_judged = decision['level_judged']
-                complexity_score = decision['score']
-                if version == 'Ours(No_CoT)':
-                    decision['use_cot'] = False
-                use_cot = decision['use_cot']
-                candidate_ids = set()
-                for c in sample.get('candidates', []):
-                    if c.get('id'):
-                        candidate_ids.add(str(c.get('id')).strip())
-                e5_retrieved = []
-                if target_lang == 'en':
-                    cross_lingual_success = False
-                elif data_type != 'real':
-                    eng_candidates = [x for x in english_pool if bool(gold_ids(str(x.get('senseid'))) & candidate_ids)]
-                    if eng_candidates:
-                        e5_retrieved = self.cl_retriever.retrieve(sample['sentence'], target_lang, eng_candidates, pre_k=EXPERIMENT_CONFIG['e5_retrieve_k'])
-                        cross_lingual_success = len(e5_retrieved) > 0
-                    else:
-                        e5_retrieved = []
-                        cross_lingual_success = False
-                else:
-                    hard_match_candidates = [x for x in english_pool if bool(gold_ids(str(x.get('senseid'))) & candidate_ids)]
-                    if hard_match_candidates:
-                        eng_candidates = hard_match_candidates
-                    else:
-                        target_lemmas = set()
-                        for cid in candidate_ids:
-                            target_lemmas.update(self.sense_to_en_lemmas.get(cid, set()))
-                        eng_candidates = []
-                        if target_lemmas:
-                            potential_candidates = [x for x in english_pool if x.get('target_word', '').lower() in target_lemmas]
-                            if potential_candidates:
-                                real_config = EXPERIMENT_CONFIG['real_data_config']
-                                pre_retrieved = self.cl_retriever.retrieve(sample['sentence'], target_lang, potential_candidates, pre_k=real_config['bridge_pre_k'] * 2)
-                                target_emb = self.cl_retriever.encode([clean_sentence(sample['sentence'])], target_lang)
-                                filtered_candidates = []
-                                strict_threshold = max(real_config.get('e5_similarity_threshold', 0.82), 0.86)
-                                for cand in pre_retrieved:
-                                    cand_emb = self.cl_retriever.encode([clean_sentence(cand.get('sentence', ''))], 'en')
-                                    sim = np.dot(cand_emb, target_emb.T).flatten()[0]
-                                    if sim >= strict_threshold:
-                                        cand['similarity'] = sim
-                                        filtered_candidates.append(cand)
-                                eng_candidates = filtered_candidates
-                    if eng_candidates:
-                        e5_retrieved = self.cl_retriever.retrieve(sample['sentence'], target_lang, eng_candidates, pre_k=EXPERIMENT_CONFIG['e5_retrieve_k'])
-                        cross_lingual_success = len(e5_retrieved) > 0
-                    else:
-                        e5_retrieved = []
-                        cross_lingual_success = False
-                real_config = EXPERIMENT_CONFIG.get('real_data_config', {})
-                fallback_trigger = False
-                if data_type == 'real' and real_config.get('fallback_only_when_empty', True):
-                    fallback_trigger = len(e5_retrieved) == 0
-                else:
-                    fallback_trigger = len(e5_retrieved) == 0
-                if fallback_trigger:
-                    fallback_count += 1
-                    fallback_pool = [x for x in monolingual_pool if x['target_word'].lower() == target_word.lower() and x['sentence'] != sample['sentence']]
-                    e5_retrieved = fallback_pool
-                if data_type == 'real':
-                    safe_k = min(3, adaptive_k)
-                    real_alpha = EXPERIMENT_CONFIG['real_data_config']['sampler_alpha']
-                    temp_sampler = DynamicSemanticSampler(alpha=real_alpha)
-                    final_selected = temp_sampler.sample(sample['sentence'], e5_retrieved, k=safe_k)
-                else:
-                    final_selected = self.sampler.sample(sample['sentence'], e5_retrieved, k=adaptive_k)
-                retrieve_example_count = len(final_selected)
-                prompt = self._build_prompt(sample, final_selected, version, use_cot=use_cot, data_type=data_type, model_name=model_key)
+            ground_truth = sample.get('senseid', '')
             resp = model.generate_response(prompt, max_tokens=1024)
             is_ok = self._robust_check(resp, ground_truth)
             if is_ok:
                 correct += 1
-            sample_result = SampleLevelResult(sample_id=sample_id, experiment_id=experiment_id, model_name=model_key, data_source=data_type, target_language=target_lang, data_level=level, system_version=version, target_word=target_word, original_sentence=sample.get('sentence', ''), clean_sentence=clean_sentence(sample.get('sentence', '')), ground_truth_senseid=ground_truth, candidate_senses=sample.get('candidates', []), complexity_score=complexity_score, adaptive_k=adaptive_k, use_cot=use_cot, level_judged=level_judged, cross_lingual_retrieve_success=cross_lingual_success, retrieve_example_count=retrieve_example_count, prompt=prompt if EXPERIMENT_CONFIG['save_prompt'] else None, model_response=resp if EXPERIMENT_CONFIG['save_response'] else None, is_correct=is_ok, sample_run_timestamp=time.strftime('%Y%m%d_%H%M%S'))
+            sample_result = SampleLevelResult(sample_id=sample_id, experiment_id=experiment_id, model_name=model_key, data_source=data_type, target_language=target_lang, data_level=level, system_version=version, target_word=target_word, original_sentence=sample.get('sentence', ''), clean_sentence=clean_sentence(sample.get('sentence', '')), ground_truth_senseid=ground_truth, candidate_senses=sample.get('candidates', []), complexity_score=complexity_score, adaptive_k=adaptive_k, use_cot=use_cot, level_judged=level_judged, cross_lingual_retrieve_success=cross_lingual_success, retrieve_example_count=retrieve_example_count, prompt=prompt if EXPERIMENT_CONFIG['save_prompt'] else None, model_response=resp if EXPERIMENT_CONFIG['save_response'] else None, is_correct=is_ok, sample_run_timestamp=time.strftime('%Y%m%d_%H%M%S'), request_metadata=dict(getattr(model, 'last_call_metadata', {})))
+            with (Path(self.output_dir) / 'sample_journal.jsonl').open('a', encoding='utf-8') as journal:
+                journal.write(json.dumps(asdict(sample_result), ensure_ascii=False) + '\n')
             sample_results.append(sample_result)
             time.sleep(EXPERIMENT_CONFIG['request_interval'])
         acc = correct / n
@@ -389,13 +420,48 @@ class ActualFusionRunner:
         print(f'    📊 {version} Result: {acc:.1%} ({correct}/{n}) | Fallback: {fallback_count}/{n} | Avg Complexity: {avg_complexity:.2f}')
         return (summary_result, sample_results)
 
+    def _english_pool(self, source):
+        from preflight import dataset_path
+        if self.allow_missing_english and not dataset_path(self.support_dir, source, 'en').exists():
+            print(f'[explicit policy] {source}: no English pool; monolingual fallback enabled')
+            return []
+        return self.load_data('en', data_type=source, reference_pool=True)
+
+    def inspect_pipeline(self, limit=1):
+        import hashlib
+        checks = []
+        for source in self.data_types:
+            english = self._english_pool(source)
+            for language in self.target_langs:
+                support = self.load_data(language, data_type=source, reference_pool=True)
+                for level in self.levels:
+                    samples = self.load_data(language, level=level, data_type=source)[:limit]
+                    for version in self.versions:
+                        for i, sample in enumerate(samples):
+                            case = self._prepare_case(sample, i, version, support, english, language, source, '')
+                            checks.append({'source': source, 'language': language, 'level': level,
+                                           'version': version, 'sample_id': sample.get('sample_id'),
+                                           'prompt_sha256': hashlib.sha256(case['prompt'].encode()).hexdigest(),
+                                           'examples': case['retrieve_example_count'],
+                                           'cross_lingual_retrieval': case['cross_lingual_success'],
+                                           'fallback': case['used_fallback']})
+        if not checks:
+            raise RuntimeError('No selected input samples; no pipeline check exported')
+        report = {'purpose': 'pipeline_validation_not_experimental_results', 'model_calls': 0,
+                  'metrics_computed': False, 'checks': checks,
+                  'configuration': EXPERIMENT_CONFIG, 'selection': self.selection, 'inputs': self.input_manifest}
+        path = Path(self.output_dir) / 'pipeline_check.json'
+        path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        print(f'真实编码器检索与提示检查完成：{len(checks)} 项；生成模型调用 0 次；未计算指标。')
+        print(path)
+
     def run_experiment(self):
         print('=' * 80 + '\n【优化版：增加消融实验的自适应融合框架】\n' + '=' * 80)
         for data_type in self.data_types:
             print(f"\n{'=' * 60}")
             print(f'📊 当前测试数据类型: {data_type.upper()}')
             print(f"{'=' * 60}")
-            english_pool = self.load_data('en', level=None, data_type=data_type, reference_pool=True)
+            english_pool = self._english_pool(data_type)
             if not english_pool:
                 print(f'🚨 警告：缺少 {data_type}-EN 数据，该组将完全依赖单语强化策略。')
             else:
@@ -446,6 +512,7 @@ class ActualFusionRunner:
         summary_df = pd.DataFrame([asdict(r) for r in self.existing_summary])
         sample_df = pd.DataFrame([asdict(r) for r in self.existing_samples])
         sample_df['candidate_senses'] = sample_df['candidate_senses'].apply(json.dumps)
+        sample_df['request_metadata'] = sample_df['request_metadata'].apply(json.dumps)
         final_summary_path = os.path.join(self.output_dir, f'fusion_summary_{self.run_ts}.csv')
         final_sample_path = os.path.join(self.output_dir, f'fusion_sample_detail_{self.run_ts}.csv')
         config_path = os.path.join(self.output_dir, f'config_{self.run_ts}.json')
@@ -471,9 +538,9 @@ class ActualFusionRunner:
 def main():
     global pd, np, SentenceTransformer, UnifiedModelInterface, BABELNET_CACHE_FILE
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--data-dir', type=Path, default=Path('data'))
-    parser.add_argument('--support-dir', type=Path, default=Path('support_data'))
-    parser.add_argument('--inventory', type=Path, default=Path(BABELNET_CACHE_FILE))
+    parser.add_argument('--data-dir', type=Path, default=Path('local_data/current/data'))
+    parser.add_argument('--support-dir', type=Path, default=Path('local_data/current/support_data'))
+    parser.add_argument('--inventory', type=Path, default=Path('local_data/current/resources/babelnet_inventory_cache_healed.json'))
     parser.add_argument('--output-dir', type=Path, default=Path('outputs'))
     parser.add_argument('--models', nargs='+', choices=['gpt-4o', 'llama-3.1-70b', 'deepseek-v3'], default=['gpt-4o', 'llama-3.1-70b', 'deepseek-v3'])
     parser.add_argument('--languages', nargs='+', choices=['fr', 'en', 'de', 'es', 'it'], default=['fr', 'en', 'de', 'es', 'it'])
@@ -483,13 +550,32 @@ def main():
     parser.add_argument('--limit', type=int, help='每个评估单元的样本上限；仅用于冒烟检查')
     parser.add_argument('--save-response', action='store_true')
     parser.add_argument('--save-prompt', action='store_true')
+    parser.add_argument('--allow-missing-english', action='store_true', help='显式允许缺少英语示例库；该来源改用单语回退并记录配置')
+    parser.add_argument('--dry-run', action='store_true', help='真实编码器构建检索与提示；不调用生成模型、不计算准确率')
+    parser.add_argument('--check-config', action='store_true', help='只检查选中模型的本地接口配置和凭证是否设置')
     parser.add_argument('--check-only', action='store_true', help='只用标准库校验输入，不加载模型或调用 API')
     args = parser.parse_args()
+    from model_interface import load_env_file, configuration, ConfigurationError
+    load_env_file()
+    paths_file = Path('models/encoder_paths.local.json')
+    if paths_file.is_file():
+        local_paths = json.loads(paths_file.read_text())
+        for key in ('WSD_E5_MODEL', 'WSD_SAMPLER_MODEL'):
+            if key in local_paths:
+                os.environ.setdefault(key, local_paths[key])
+    EXPERIMENT_CONFIG['cross_lingual_model'] = os.environ.get('WSD_E5_MODEL', EXPERIMENT_CONFIG['cross_lingual_model'])
+    EXPERIMENT_CONFIG['semantic_sampler_model'] = os.environ.get('WSD_SAMPLER_MODEL', EXPERIMENT_CONFIG['semantic_sampler_model'])
+    if args.check_config:
+        for alias in args.models:
+            try:
+                configuration(alias)
+            except ConfigurationError as exc:
+                parser.exit(2, str(exc) + '\n')
+        print('模型身份与本地凭证配置检查通过；未请求服务。')
+        return 0
     if args.limit is not None and args.limit < 1:
         parser.error('--limit 必须为正整数')
-    errors, manifest = validate_inputs(args.data_dir, args.support_dir, args.inventory, args.data_types, args.languages)
-    if not Path(__file__).with_name('model_interface.py').is_file():
-        errors.append('缺少 model_interface.py；请按 docs/model_interface.md 自行补充真实模型接口。')
+    errors, manifest = validate_inputs(args.data_dir, args.support_dir, args.inventory, args.data_types, args.languages, require_english=not args.allow_missing_english)
     if errors:
         for error in errors:
             print('[输入检查] ' + error, file=sys.stderr)
@@ -497,6 +583,12 @@ def main():
     print('输入静态校验通过；尚未验证模型服务、凭证或端到端结果。')
     if args.check_only:
         return 0
+    if not args.dry_run:
+        for alias in args.models:
+            try:
+                configuration(alias)
+            except ConfigurationError as exc:
+                parser.exit(2, str(exc) + '\n')
     from importlib.metadata import version
     import pandas as pd
     import numpy as np
@@ -510,12 +602,20 @@ def main():
         EXPERIMENT_CONFIG['debug_sample_size'] = args.limit
     run_dir = args.output_dir / (time.strftime('%Y%m%d_%H%M%S') + '_' + uuid4().hex[:8])
     runner = ActualFusionRunner(args.data_dir, args.support_dir, str(run_dir), args.data_types,
-                               args.models, args.languages, args.versions, args.levels)
+                               [] if args.dry_run else args.models, args.languages, args.versions, args.levels)
+    runner.allow_missing_english = args.allow_missing_english
     runner.selection = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
     runner.selection['package_versions'] = {name: version(name) for name in ('numpy', 'pandas', 'sentence-transformers', 'tabulate', 'torch', 'transformers')}
     runner.selection['python_version'] = sys.version
+    setup_file = Path('models/encoder_setup.json')
+    if setup_file.is_file():
+        runner.selection['encoder_setup'] = json.loads(setup_file.read_text())
     runner.input_manifest = manifest
-    runner.run_experiment()
+    if args.dry_run:
+        runner.inspect_pipeline(args.limit or 1)
+    else:
+        runner.selection['model_interfaces'] = {name: model.describe() for name, model in runner.model_interfaces.items()}
+        runner.run_experiment()
     return 0
 
 

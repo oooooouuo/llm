@@ -18,7 +18,6 @@ dist/
 *.key
 secrets/
 credentials*
-model_interface.py
 # Data and resource caches are local-only; retain guidance files
 /data/*
 !/data/README.md
@@ -56,3 +55,6 @@ secrets.*
 .ssh/
 id_rsa*
 id_ed25519*
+
+# Prepared inputs, provenance ledgers and local conversion products
+local_data/
